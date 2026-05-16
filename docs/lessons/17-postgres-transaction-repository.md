@@ -1,202 +1,153 @@
-# Lesson 17：PostgreSQL 与事务设计
+# Lesson 17：PostgreSQL、事务与 Repository
 
 ## 学习目标
 
 完成本课后，学习者应该能够：
 
-- 数据库是系统一致性的核心边界，不能只当 CRUD 存储。
-- 事务边界通常由 service/usecase 决定。
-- repository 负责持久化细节，但不拥有业务流程。
-- 慢查询、锁等待、连接池耗尽都必须可观测。
-- 使用工具和实验验证本课核心机制，而不是只停留在概念理解。
-- 将本课机制转化为生产代码中的设计判断、排查路径和 review 标准。
+- 设计 repository 边界。
+- 理解事务边界与隔离级别。
+- 处理 context 与 DB timeout。
+- 识别 N+1 和事务过大问题。
+- 将本节主题落到 Production Job Runner 的生产设计中。
 
 ---
 
 ## 关键问题
 
-1. connection pool 如何配置？
-2. 事务边界应该在哪一层？
-3. isolation level 如何选择？
-4. 如何处理 deadlock 和 retry？
-5. repository interface 放在哪里？
+1. 这个主题解决的生产问题是什么？
+2. 相关 Go 标准库或主流生态能力的边界在哪里？
+3. 失败模式、超时、取消和回滚如何设计？
+4. 如何用测试、benchmark、profile 或故障演练验证？
+5. 在 Production Job Runner 中应如何落地？
 
 ---
 
 ## 核心结论
 
-- 数据库是系统一致性的核心边界，不能只当 CRUD 存储。
-- 事务边界通常由 service/usecase 决定。
-- repository 负责持久化细节，但不拥有业务流程。
-- 慢查询、锁等待、连接池耗尽都必须可观测。
-- Outbox pattern 是事务与事件一致性的常用解法。
+- 本节关键词：**postgres、transaction、repository、isolation、context、sql**。
+- 生产级 Go 开发的重点不是堆技术，而是边界清晰、失败可控、可观测、可验证。
+- 每个组件都要明确 owner、输入输出、错误语义、超时策略和观测指标。
+- 优先用简单直接的实现；复杂模式必须由真实约束或指标驱动。
+- 本节 Lab 用最小事件处理模型固化通用工程能力：context、错误、状态、测试、benchmark。
 
 ---
 
 ## 设计哲学
 
-Go 的很多机制都服务于工程协作：让控制流、数据流、错误流和资源生命周期尽量显式。
-
-本课需要持续追问三件事：
-
-1. 这个机制让代码更简单，还是只是让抽象更多？
-2. 这个机制在小程序里看起来无所谓，在生产环境下会放大成什么问题？
-3. 我们如何用工具验证自己的判断？
-
-对于 `PostgreSQL 与事务设计`，不要只记 API 或术语，而要理解它对以下方面的影响：
-
-- 可读性
-- 可测试性
-- 性能
-- 并发安全
-- 故障隔离
-- 可观测性
-
----
-
-## 底层机制
-
-本课涉及的核心概念：
-
-- `pgx`
-- `database/sql`
-- `connection pool`
-- `transaction`
-- `isolation`
-- `row lock`
-- `deadlock`
-- `migration`
-- `sqlc`
-- `outbox`
-
-建议讲解顺序：
-
-1. 先用最小代码复现现象。
-2. 再解释 runtime、编译器或标准库背后的机制。
-3. 最后回到生产代码中应该如何取舍。
-
-### 必讲层
-
-- 机制的基本数据结构或执行模型。
-- 常见误区和最小复现。
-- 与测试、benchmark、race detector 或 pprof 的验证方式。
-
-### 深入层
-
-- runtime 或编译器层面的实现思路。
-- 性能成本和资源生命周期。
-- 与生产故障之间的联系。
-
-### 拓展层
-
-- 源码细节、版本差异、极端优化手段只作为延伸阅读，不作为主线要求。
-
----
-
-## 代码实验
-
-建议实验目录：
+Go 的工程化实践强调组合胜过继承、显式胜过隐式、可读胜过炫技。对于 **PostgreSQL、事务与 Repository**，设计时应先问：
 
 ```text
-labs/17-postgres-transaction-repository/
-  README.md
-  go.mod
-  main.go 或 *_test.go
+边界在哪里？
+谁拥有状态？
+失败如何传播？
+是否支持 context 取消？
+是否有容量和超时预算？
+如何观测和验证？
 ```
 
-实验目标：
+如果一个设计无法解释失败路径，它还不是生产级设计。
 
-- 构造一个最小示例观察本课现象。
-- 修改代码触发不同结果。
-- 用 Go 工具链验证解释是否正确。
+---
 
-运行命令：
+## 核心概念
+
+### 1. 边界设计
+
+将协议适配、业务编排、持久化、异步执行、可观测性拆开。每层只承担稳定职责，避免把所有逻辑塞进 handler 或 worker。
+
+### 2. 失败模式
+
+常见失败包括：超时、取消、资源耗尽、重复请求、部分成功、下游不可用、配置错误、部署回滚、观测缺失。
+
+### 3. 验证方法
 
 ```bash
 go test ./...
-docker compose up postgres
-goose up
+go test -race ./...
+go test -bench=. -benchmem ./...
+go vet ./...
 ```
 
-实验 README 应包含：
-
-```text
-观察目标
-运行命令
-预期输出
-现象解释
-变体实验
-生产启发
-```
+需要时加入 pprof、GODEBUG、故障注入、集成测试和压测。
 
 ---
 
 ## 生产实践
 
-- 使用 migration 管理 schema。
-- 每个 DB 调用都带 context timeout。
-- 连接池大小按实例和 DB 容量配置。
-- 关键查询要有 index 和慢查询观测。
+在 Production Job Runner 中，本节应落到：
 
-生产环境下要额外关注：
+- job_id / request_id / trace_id 全链路传播。
+- API、scheduler、worker、repository 的依赖方向清晰。
+- 超时、重试、幂等、错误映射有明确策略。
+- 关键指标包括 queue depth、duration、error code、retry count、worker active count。
+- 每个关键失败路径都有测试或演练脚本。
 
-- 失败路径是否显式。
-- 资源生命周期是否可控。
-- 是否存在隐式共享状态。
-- 是否能通过日志、指标、trace 或 profile 定位问题。
-- 是否有测试覆盖正常路径、边界路径和故障路径。
+---
+
+## 代码实验
+
+配套实验目录：
+
+```text
+labs/17-postgres-transaction-repository/
+```
+
+运行：
+
+```bash
+cd labs/17-postgres-transaction-repository
+go test ./...
+go test -race ./...
+go test -bench=. -benchmem ./...
+go vet ./...
+```
 
 ---
 
 ## 常见误区
 
-- 把“能运行”误认为“生产可接受”。
-- 在没有 benchmark/profile 证据时做性能判断。
-- 用复杂抽象掩盖不清晰的边界。
-- 忽略取消、超时、错误包装和资源释放。
-- 只测试成功路径，不测试故障和并发路径。
+1. 只记 API，不设计边界。
+2. 只测 happy path，不测失败路径。
+3. 没有指标就开始优化。
+4. 让单个组件同时承担协议、业务、存储和观测。
+5. 把复杂模式当作生产级的证明。
 
 ---
 
 ## 故障案例
 
-课堂中建议构造一个故障场景：
+### 案例：缺少观测导致无法定位瓶颈
 
-```text
-现象：服务延迟升高、资源持续增长或错误难以定位。
-假设：与本课机制相关。
-验证：使用测试、race detector、pprof、trace 或日志定位。
-修复：调整代码结构、同步策略、错误处理或资源生命周期。
-复盘：把经验转化为 review checklist。
-```
+线上任务延迟升高，但日志没有 job_id，指标没有 queue depth，trace 没有跨 API/worker/repository 传播，导致无法判断瓶颈在 API、DB、队列还是 worker。
+
+修复：补齐结构化日志、RED/USE 指标、trace context、错误分类和失败路径测试。
 
 ---
 
 ## 作业
 
-1. 写一个最小复现实验，证明本课的一个核心结论。
-2. 为实验补充 table-driven tests 或 benchmark。
-3. 写一段 300–500 字短文，解释这个机制如何影响生产系统设计。
-4. 从现有项目中找一处相关代码，给出 review 建议。
+1. 运行本节 Lab 的测试、race detector 和 benchmark。
+2. 增加一个失败路径测试。
+3. 写一段 Production Job Runner 落地设计。
+4. 列出 3 个指标、2 个告警、2 个故障演练。
+5. 说明本节设计中哪些地方应保持简单，哪些地方值得抽象。
 
 ---
 
 ## 评估标准
 
-- 能否清楚解释关键问题，而不是背诵术语。
-- 能否用命令和实验输出支撑结论。
-- 能否识别常见误区并给出替代方案。
-- 能否把机制落到生产实践和故障排查。
-- 代码是否通过必要的测试、race、benchmark 或构建检查。
+- 能解释本节主题的生产价值和边界。
+- 能写出可测试的最小实现。
+- 能识别关键失败模式。
+- 能定义观测指标和验证方法。
+- 能把主题落到综合项目设计中。
 
 ---
 
 ## 延伸阅读
 
+- Go standard library documentation
 - Effective Go
-- Go Blog
-- Go Specification
-- Go Memory Model
 - Go Code Review Comments
+- OpenTelemetry / pprof / runtime documentation as applicable
 - 100 Go Mistakes and How to Avoid Them
-- Go runtime source code（按需阅读，不要求逐行掌握）

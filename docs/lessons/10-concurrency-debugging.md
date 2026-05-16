@@ -1,201 +1,197 @@
-# Lesson 10：并发故障排查
+# Lesson 10：并发 Debugging 与 Race Detector
 
 ## 学习目标
 
 完成本课后，学习者应该能够：
 
-- 并发故障往往表现为延迟、资源耗尽、吞吐下降，而不是直接 panic。
-- goroutine profile 用于定位阻塞栈。
-- block profile 看等待 channel/mutex 的阻塞时间。
-- mutex profile 看锁竞争热点。
-- 使用工具和实验验证本课核心机制，而不是只停留在概念理解。
-- 将本课机制转化为生产代码中的设计判断、排查路径和 review 标准。
+- 使用 race detector 定位 data race。
+- 识别 deadlock、goroutine leak 和阻塞热点。
+- 采集 goroutine dump、block profile、mutex profile。
+- 建立并发故障排查 checklist。
+- 将本节主题落到 Production Job Runner 的生产设计中。
 
 ---
 
 ## 关键问题
 
-1. goroutine leak 常见模式有哪些？
-2. 如何看 goroutine profile？
-3. block profile 和 mutex profile 分别解决什么？
-4. go tool trace 能看到什么？
-5. 生产排查并发问题的顺序是什么？
+1. 这个主题解决的生产问题是什么？
+2. Go 标准库或主流生态提供了哪些基础能力？
+3. 这个能力的默认行为、边界和失败模式是什么？
+4. 如何通过测试、benchmark、profile 或故障演练验证设计？
+5. 在 Production Job Runner 中，这个主题应该如何落地？
 
 ---
 
 ## 核心结论
 
-- 并发故障往往表现为延迟、资源耗尽、吞吐下降，而不是直接 panic。
-- goroutine profile 用于定位阻塞栈。
-- block profile 看等待 channel/mutex 的阻塞时间。
-- mutex profile 看锁竞争热点。
-- 排查必须结合 metrics、pprof、日志和最小复现。
+- 本节关键词：**race detector、goroutine dump、block profile、mutex profile、deadlock、leak**。
+- 生产级 Go 课程不只讲 API 用法，更要讲设计边界、故障模式和观测方式。
+- 所有工程决策都应能回答：为什么这样设计、失败时如何表现、如何验证、如何回滚。
+- 简单实现优先；只有在指标证明瓶颈存在时，再引入复杂优化。
+- 本节配套 Lab 提供最小可运行实验，用于把抽象概念变成可观察现象。
 
 ---
 
 ## 设计哲学
 
-Go 的很多机制都服务于工程协作：让控制流、数据流、错误流和资源生命周期尽量显式。
-
-本课需要持续追问三件事：
-
-1. 这个机制让代码更简单，还是只是让抽象更多？
-2. 这个机制在小程序里看起来无所谓，在生产环境下会放大成什么问题？
-3. 我们如何用工具验证自己的判断？
-
-对于 `并发故障排查`，不要只记 API 或术语，而要理解它对以下方面的影响：
-
-- 可读性
-- 可测试性
-- 性能
-- 并发安全
-- 故障隔离
-- 可观测性
-
----
-
-## 底层机制
-
-本课涉及的核心概念：
-
-- `goroutine leak`
-- `block profile`
-- `mutex profile`
-- `runtime/trace`
-- `pprof`
-- `deadlock`
-- `starvation`
-- `contention`
-
-建议讲解顺序：
-
-1. 先用最小代码复现现象。
-2. 再解释 runtime、编译器或标准库背后的机制。
-3. 最后回到生产代码中应该如何取舍。
-
-### 必讲层
-
-- 机制的基本数据结构或执行模型。
-- 常见误区和最小复现。
-- 与测试、benchmark、race detector 或 pprof 的验证方式。
-
-### 深入层
-
-- runtime 或编译器层面的实现思路。
-- 性能成本和资源生命周期。
-- 与生产故障之间的联系。
-
-### 拓展层
-
-- 源码细节、版本差异、极端优化手段只作为延伸阅读，不作为主线要求。
-
----
-
-## 代码实验
-
-建议实验目录：
+Go 的工程哲学偏向直接、可读、可组合。对于 **并发 Debugging 与 Race Detector**，不要把问题理解成“选一个库”或“套一个模式”，而要从系统边界出发：
 
 ```text
-labs/10-concurrency-debugging/
-  README.md
-  go.mod
-  main.go 或 *_test.go
+输入是什么？
+输出是什么？
+谁拥有状态？
+失败如何传播？
+超时和取消如何生效？
+如何观测？
+如何测试？
 ```
 
-实验目标：
+好的 Go 代码通常不是抽象层数最多的代码，而是边界清楚、依赖方向稳定、失败路径明确的代码。
 
-- 构造一个最小示例观察本课现象。
-- 修改代码触发不同结果。
-- 用 Go 工具链验证解释是否正确。
+---
 
-运行命令：
+## 底层机制与核心概念
+
+### 1. 语义边界
+
+先明确本节主题的语义边界。不要让一个组件同时承担过多职责。比如：
+
+- API 层负责协议、校验、错误映射。
+- Service 层负责业务编排和事务边界。
+- Repository 层负责持久化细节。
+- Worker 层负责异步执行和生命周期。
+- Observability 层负责日志、指标、追踪，而不是业务决策。
+
+### 2. 失败模式
+
+每个生产组件都要列出失败模式：
+
+```text
+超时
+取消
+并发冲突
+资源耗尽
+下游错误
+部分成功
+重复执行
+观测缺失
+```
+
+### 3. 验证方式
+
+验证不能只靠“手动跑一下”。应至少包含：
 
 ```bash
-go tool pprof
-go test -blockprofile block.out
-go test -mutexprofile mutex.out
-go test -trace trace.out
+go test ./...
+go test -race ./...
+go test -bench=. -benchmem ./...
+go vet ./...
 ```
 
-实验 README 应包含：
-
-```text
-观察目标
-运行命令
-预期输出
-现象解释
-变体实验
-生产启发
-```
+涉及性能或 runtime 的主题，还应加入 pprof、trace、GODEBUG 或故障注入。
 
 ---
 
 ## 生产实践
 
-- 服务暴露受保护的 pprof endpoint。
-- 所有 worker 和 background loop 要有退出信号。
-- 使用超时防止外部依赖永久阻塞。
-- 用故障注入验证泄漏与阻塞路径。
+### Production Job Runner 落地点
 
-生产环境下要额外关注：
+在综合项目中，本节内容应落到以下问题：
 
-- 失败路径是否显式。
-- 资源生命周期是否可控。
-- 是否存在隐式共享状态。
-- 是否能通过日志、指标、trace 或 profile 定位问题。
-- 是否有测试覆盖正常路径、边界路径和故障路径。
+- API/worker/repository 的边界是否清晰？
+- context 是否全链路传递？
+- timeout、retry、幂等和错误映射是否明确？
+- 是否有足够指标判断系统健康？
+- 是否有测试证明关键失败路径？
+- 是否能在部署时快速回滚？
+
+### 工程 checklist
+
+```text
+是否有单元测试？
+是否有 race detector 验证？
+是否有 benchmark 或 profile？
+是否记录 request_id / job_id / trace_id？
+是否有健康检查？
+是否有容量和超时配置？
+是否有故障演练？
+```
+
+---
+
+## 代码实验
+
+配套实验目录：
+
+```text
+labs/10-concurrency-debugging/
+```
+
+运行：
+
+```bash
+cd labs/10-concurrency-debugging
+go test ./...
+go test -race ./...
+go test -bench=. -benchmem ./...
+go vet ./...
+```
+
+实验目标：
+
+- 用最小代码复现本节核心机制。
+- 用测试固定正确行为。
+- 用 benchmark 或 profile 建立优化前后的可观察对比。
+- 总结生产启发。
 
 ---
 
 ## 常见误区
 
-- 把“能运行”误认为“生产可接受”。
-- 在没有 benchmark/profile 证据时做性能判断。
-- 用复杂抽象掩盖不清晰的边界。
-- 忽略取消、超时、错误包装和资源释放。
-- 只测试成功路径，不测试故障和并发路径。
+1. 只记住 API，不理解边界。
+2. 只写 happy path，不测试失败路径。
+3. 只看平均延迟，不看 tail latency 和错误率。
+4. 用复杂模式掩盖需求不清。
+5. 没有指标就开始优化。
 
 ---
 
 ## 故障案例
 
-课堂中建议构造一个故障场景：
+### 案例：设计中缺少边界和观测
 
-```text
-现象：服务延迟升高、资源持续增长或错误难以定位。
-假设：与本课机制相关。
-验证：使用测试、race detector、pprof、trace 或日志定位。
-修复：调整代码结构、同步策略、错误处理或资源生命周期。
-复盘：把经验转化为 review checklist。
-```
+症状：线上出现延迟升高或任务堆积，但无法判断是 API、DB、队列、worker 还是下游服务导致。
+
+根因：组件边界不清，日志缺少 job_id/request_id，指标缺少 queue depth、duration、error code。
+
+修复：补齐结构化日志、关键指标、错误分类和 context 传播，并增加失败路径测试。
 
 ---
 
 ## 作业
 
-1. 写一个最小复现实验，证明本课的一个核心结论。
-2. 为实验补充 table-driven tests 或 benchmark。
-3. 写一段 300–500 字短文，解释这个机制如何影响生产系统设计。
-4. 从现有项目中找一处相关代码，给出 review 建议。
+1. 阅读本节 Lab，运行所有测试和 benchmark。
+2. 为 Lab 增加一个失败路径测试。
+3. 写一段设计说明：这个主题在 Production Job Runner 中如何落地。
+4. 列出 3 个可观测指标和 2 个故障演练场景。
+5. 对比两种实现方案，说明你会选择哪一个以及原因。
 
 ---
 
 ## 评估标准
 
-- 能否清楚解释关键问题，而不是背诵术语。
-- 能否用命令和实验输出支撑结论。
-- 能否识别常见误区并给出替代方案。
-- 能否把机制落到生产实践和故障排查。
-- 代码是否通过必要的测试、race、benchmark 或构建检查。
+- 能解释本节核心概念和设计边界。
+- 能写出可测试的最小实现。
+- 能识别至少三个生产失败模式。
+- 能说明如何观测和验证。
+- 能将本节内容映射到综合项目。
 
 ---
 
 ## 延伸阅读
 
+- Go standard library documentation
 - Effective Go
-- Go Blog
-- Go Specification
-- Go Memory Model
 - Go Code Review Comments
 - 100 Go Mistakes and How to Avoid Them
-- Go runtime source code（按需阅读，不要求逐行掌握）
+- OpenTelemetry / pprof / runtime documentation as applicable
