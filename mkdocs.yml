@@ -30,6 +30,7 @@ markdown_extensions:
 
 nav:
   - 首页: index.md
+  - 课程设计: course-design.md
   - 课程大纲: syllabus.md
   - 课程:
       - "Lesson 1：Go 的设计哲学与工程化取舍": lessons/01-go-design-philosophy.md
