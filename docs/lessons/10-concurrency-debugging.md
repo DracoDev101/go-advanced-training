@@ -33,6 +33,54 @@
 
 ---
 
+
+## 0. 系统化排查流程：不要从修复开始
+
+并发和性能问题最容易陷入“猜一个原因然后改代码”。本课要求按证据推进：
+
+```text
+1. 现象分型：错误结果 / 卡死 / 变慢 / 泄漏 / 队列堆积
+2. 影响面：单实例、单 endpoint、单 job kind，还是全局
+3. 时间线：是否和发布、配置、流量、依赖故障相关
+4. 证据包：日志 + 指标 + goroutine dump + 对应 profile
+5. 缩小组件：API / worker / DB / queue / downstream / runtime
+6. 单一假设：说明“我认为 X 是根因，因为证据 Y”
+7. 最小验证：定向测试、benchmark、profile 对比或故障复现
+8. 修复根因：补回归测试和观测信号
+```
+
+首轮证据采集命令：
+
+```bash
+# goroutine dump：卡死、泄漏、CPU 低但延迟高
+curl -s http://127.0.0.1:6060/debug/pprof/goroutine?debug=2 > goroutine.txt
+
+# CPU profile：CPU 高或整体慢
+curl -s 'http://127.0.0.1:6060/debug/pprof/profile?seconds=30' > cpu.out
+
+# heap / allocs：内存上涨或 GC 压力
+curl -s http://127.0.0.1:6060/debug/pprof/heap > heap.out
+curl -s http://127.0.0.1:6060/debug/pprof/allocs > allocs.out
+
+# mutex / block：锁竞争或同步阻塞，需要程序开启采样率
+curl -s http://127.0.0.1:6060/debug/pprof/mutex > mutex.out
+curl -s http://127.0.0.1:6060/debug/pprof/block > block.out
+```
+
+分析入口：
+
+```bash
+go tool pprof -http=:0 cpu.out
+go tool pprof -http=:0 -alloc_space allocs.out
+go tool pprof -http=:0 -inuse_space heap.out
+go tool pprof -http=:0 mutex.out
+go tool pprof -http=:0 block.out
+```
+
+完整手册见：`references/troubleshooting-playbook.md`。
+
+---
+
 ## 1. 问题分类：同样是“并发出问题”，其实是四类问题
 
 | 症状 | 常见根因 | 主要工具 |

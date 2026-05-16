@@ -84,4 +84,6 @@ nav:
       - "Lab 24：综合项目 Review": labs/24-final-project-review.md
   - 综合项目:
       - Production Job Runner: projects/production-job-runner.md
-  - 参考资料: references/reading-list.md
+  - 参考资料:
+      - 阅读清单: references/reading-list.md
+      - Go 生产问题排查手册: references/troubleshooting-playbook.md
