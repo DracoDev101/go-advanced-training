@@ -66,6 +66,7 @@ nav:
       - "Lab 6：Goroutine 与 GMP 调度模型": labs/06-goroutine-scheduler.md
       - "Lab 7：Channel 原理与使用边界": labs/07-channel-boundaries.md
       - "Lab 8：Context 与取消传播": labs/08-context-cancellation.md
+      - "Lab 9：sync、atomic 与 Go Memory Model": labs/09-sync-atomic-memory-model.md
   - 综合项目:
       - Production Job Runner: projects/production-job-runner.md
   - 参考资料: references/reading-list.md

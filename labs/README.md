@@ -22,6 +22,7 @@ labs/
 - Lab 6：Goroutine 与 GMP 调度模型：`06-goroutine-scheduler/`
 - Lab 7：Channel 原理与使用边界：`07-channel-boundaries/`
 - Lab 8：Context 与取消传播：`08-context-cancellation/`
+- Lab 9：sync、atomic 与 Go Memory Model：`09-sync-atomic-memory-model/`
 
 ## 通用要求
 
