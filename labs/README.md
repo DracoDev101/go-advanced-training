@@ -20,6 +20,7 @@ labs/
 - Lab 4：Interface 深入：`04-interface-deep-dive/`
 - Lab 5：Error Handling 生产实践：`05-error-handling/`
 - Lab 6：Goroutine 与 GMP 调度模型：`06-goroutine-scheduler/`
+- Lab 7：Channel 原理与使用边界：`07-channel-boundaries/`
 
 ## 通用要求
 
