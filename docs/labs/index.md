@@ -16,6 +16,7 @@ labs/
 ## 已有实验
 
 - [Lab 2：值、指针与逃逸分析](02-escape-analysis.md)
+- [Lab 3：Slice、Map、String 底层结构](03-slice-map-string.md)
 
 ## 通用要求
 
