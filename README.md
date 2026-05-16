@@ -71,6 +71,37 @@ go-advanced-training/
 7. 可观测性、可靠性与运维设计
 8. 综合项目：Production Job Runner
 
+## Web 预览
+
+本仓库内置 MkDocs Material 配置。
+
+本地预览：
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+mkdocs serve
+```
+
+默认访问：
+
+```text
+http://127.0.0.1:8000
+```
+
+构建静态站点：
+
+```bash
+mkdocs build --strict
+```
+
+GitHub Pages：
+
+- 已包含 `.github/workflows/pages.yml`。
+- 推送到 `main` 后会用 GitHub Actions 构建 `site/` 并部署到 Pages。
+- 如果第一次部署失败，需要在 GitHub 仓库 `Settings → Pages` 中把 Source 设置为 `GitHub Actions`。
+
 ## 综合项目
 
 最终项目是一个 **Production Job Runner**：任务提交、调度、执行、取消、超时、重试、事件发布、状态持久化、observability、pprof 与 Docker Compose 一体化的生产级 Go 后端系统。
