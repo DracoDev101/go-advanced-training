@@ -1,32 +1,56 @@
 # Lab 12：Benchmark 与 pprof 性能诊断
 
-本实验配套 Lesson 12，用统一的最小事件处理模型练习：context 取消、错误处理、状态记录、并发安全、benchmark 和生产 checklist。
+本实验展示三件事：可信 benchmark、优化前后对比、pprof 定位。
 
-## 关键词
-
-benchmark, pprof, CPU profile, heap profile, allocs/op, optimization
-
-## 运行命令
+## 运行
 
 ```bash
-cd labs/12-benchmark-pprof
-
 go test ./...
 go test -race ./...
 go test -bench=. -benchmem ./...
 go vet ./...
 ```
 
-## 观察目标
+## 1. Bad benchmark vs Good benchmark
 
-1. 正常路径会记录事件并更新计数。
-2. 无效输入返回稳定错误。
-3. 已取消 context 会中断处理。
-4. benchmark 提供后续优化基线。
-5. 通过最小模型讨论本节主题在 Production Job Runner 中的落地。
+```bash
+go test -bench='Benchmark(Bad|Good)Summary' -benchmem ./...
+```
+
+`BenchmarkBadSummaryIncludesSetup` 把输入构造也算进热路径；`BenchmarkGoodSummaryExcludesSetup` 用 `b.ResetTimer()` 排除 setup。
+
+## 2. 优化前后对比
+
+```bash
+go test -bench='Benchmark(Slow|Fast)Summary' -benchmem -count=10 ./... > summary.txt
+```
+
+如果安装了 benchstat：
+
+```bash
+go install golang.org/x/perf/cmd/benchstat@latest
+# 分别保存 old.txt/new.txt 后：
+benchstat old.txt new.txt
+```
+
+## 3. CPU profile
+
+```bash
+go test -run=^$ -bench=BenchmarkSlowSummary -cpuprofile cpu.out ./...
+go tool pprof -http=:0 cpu.out
+```
+
+在 pprof 中看 `top`、`list SlowSummary`。
+
+## 4. Heap / alloc profile
+
+```bash
+go test -run=^$ -bench=BenchmarkSlowSummary -benchmem -memprofile mem.out ./...
+go tool pprof -http=:0 -alloc_space mem.out
+```
+
+`alloc_space` 更适合找分配热点；`inuse_space` 更适合找长期持有。
 
 ## 生产启发
 
-- 每个生产组件都要有 context、错误语义、观测字段和测试。
-- 不要只实现 happy path，失败路径必须可验证。
-- benchmark 不是最终答案，但能防止凭感觉优化。
+Production Job Runner 的性能优化必须走闭环：指标发现瓶颈 → pprof 定位 → benchmark 重现 → 最小修改 → benchstat/线上指标验证。不要先凭直觉改 JSON、锁或缓存。
