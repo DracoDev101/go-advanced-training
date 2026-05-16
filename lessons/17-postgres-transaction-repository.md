@@ -2,97 +2,50 @@
 
 ## 学习目标
 
-完成本课后，学习者应该能够：
-
-- 设计 repository 边界。
-- 理解事务边界与隔离级别。
-- 处理 context 与 DB timeout。
-- 识别 N+1 和事务过大问题。
-- 将本节主题落到 Production Job Runner 的生产设计中。
+完成本课后，学习者应该能够掌握：connection pool 受 DB CPU/连接数/query latency 约束；transaction boundary 围绕一致性不变量；isolation、row lock、deadlock、retry；outbox pattern。
 
 ---
 
 ## 关键问题
 
-1. 这个主题解决的生产问题是什么？
-2. 相关 Go 标准库或主流生态能力的边界在哪里？
-3. 失败模式、超时、取消和回滚如何设计？
-4. 如何用测试、benchmark、profile 或故障演练验证？
-5. 在 Production Job Runner 中应如何落地？
+1. 本课主题解决哪个具体生产问题？
+2. 它的正确边界是什么，哪些事情不该由它承担？
+3. 默认行为中有哪些容易踩坑的地方？
+4. 失败时如何观测、定位和恢复？
+5. 在 Production Job Runner 中如何落地并验证？
 
 ---
 
 ## 核心结论
 
-- 本节关键词：**postgres、transaction、repository、isolation、context、sql**。
-- 生产级 Go 开发的重点不是堆技术，而是边界清晰、失败可控、可观测、可验证。
-- 每个组件都要明确 owner、输入输出、错误语义、超时策略和观测指标。
-- 优先用简单直接的实现；复杂模式必须由真实约束或指标驱动。
-- 本节 Lab 用最小事件处理模型固化通用工程能力：context、错误、状态、测试、benchmark。
+PostgreSQL 不只是存储层；很多业务竞态必须在 DB 条件更新和事务里解决。
 
 ---
 
-## 设计哲学
+## 硬核要点
 
-Go 的工程化实践强调组合胜过继承、显式胜过隐式、可读胜过炫技。对于 **PostgreSQL、事务与 Repository**，设计时应先问：
+Claim job 应使用条件更新：
 
-```text
-边界在哪里？
-谁拥有状态？
-失败如何传播？
-是否支持 context 取消？
-是否有容量和超时预算？
-如何观测和验证？
+```sql
+UPDATE jobs
+SET status='running', locked_by=$2, locked_at=now()
+WHERE id=$1 AND status='pending'
+RETURNING id;
 ```
 
-如果一个设计无法解释失败路径，它还不是生产级设计。
+返回 0 行说明被其他 worker 抢走，不是 Go data race。
 
 ---
 
-## 核心概念
+## Production Job Runner 落地
 
-### 1. 边界设计
-
-将协议适配、业务编排、持久化、异步执行、可观测性拆开。每层只承担稳定职责，避免把所有逻辑塞进 handler 或 worker。
-
-### 2. 失败模式
-
-常见失败包括：超时、取消、资源耗尽、重复请求、部分成功、下游不可用、配置错误、部署回滚、观测缺失。
-
-### 3. 验证方法
-
-```bash
-go test ./...
-go test -race ./...
-go test -bench=. -benchmem ./...
-go vet ./...
-```
-
-需要时加入 pprof、GODEBUG、故障注入、集成测试和压测。
-
----
-
-## 生产实践
-
-在 Production Job Runner 中，本节应落到：
-
-- job_id / request_id / trace_id 全链路传播。
-- API、scheduler、worker、repository 的依赖方向清晰。
-- 超时、重试、幂等、错误映射有明确策略。
-- 关键指标包括 queue depth、duration、error code、retry count、worker active count。
-- 每个关键失败路径都有测试或演练脚本。
+本课内容必须映射到综合项目中的一个可验证设计点：明确 API / worker / repository / infrastructure 的责任边界；给出 timeout、retry、幂等、错误映射或一致性策略；定义至少 3 个观测信号；写一个失败路径测试或故障演练步骤。
 
 ---
 
 ## 代码实验
 
-配套实验目录：
-
-```text
-labs/17-postgres-transaction-repository/
-```
-
-运行：
+配套实验目录：`labs/17-postgres-transaction-repository/`
 
 ```bash
 cd labs/17-postgres-transaction-repository
@@ -102,52 +55,21 @@ go test -bench=. -benchmem ./...
 go vet ./...
 ```
 
+建议后续把当前最小 Lab 升级为本课专项 Lab，而不是只复用通用事件模型。
+
 ---
 
 ## 常见误区
 
-1. 只记 API，不设计边界。
-2. 只测 happy path，不测失败路径。
-3. 没有指标就开始优化。
-4. 让单个组件同时承担协议、业务、存储和观测。
-5. 把复杂模式当作生产级的证明。
+1. 用框架或组件名替代设计边界。
+2. 只写 happy path，不验证失败路径。
+3. 只讨论“能不能跑”，不讨论容量、超时、回滚和观测。
+4. 在没有指标和 profile 的情况下过早优化或过早抽象。
 
 ---
 
-## 故障案例
+## 作业与评估
 
-### 案例：缺少观测导致无法定位瓶颈
+作业：写一页 Production Job Runner 落地设计；补充一个失败路径测试；定义 3 个指标和 2 个日志字段；说明一个不应该使用本技术/模式的场景。
 
-线上任务延迟升高，但日志没有 job_id，指标没有 queue depth，trace 没有跨 API/worker/repository 传播，导致无法判断瓶颈在 API、DB、队列还是 worker。
-
-修复：补齐结构化日志、RED/USE 指标、trace context、错误分类和失败路径测试。
-
----
-
-## 作业
-
-1. 运行本节 Lab 的测试、race detector 和 benchmark。
-2. 增加一个失败路径测试。
-3. 写一段 Production Job Runner 落地设计。
-4. 列出 3 个指标、2 个告警、2 个故障演练。
-5. 说明本节设计中哪些地方应保持简单，哪些地方值得抽象。
-
----
-
-## 评估标准
-
-- 能解释本节主题的生产价值和边界。
-- 能写出可测试的最小实现。
-- 能识别关键失败模式。
-- 能定义观测指标和验证方法。
-- 能把主题落到综合项目设计中。
-
----
-
-## 延伸阅读
-
-- Go standard library documentation
-- Effective Go
-- Go Code Review Comments
-- OpenTelemetry / pprof / runtime documentation as applicable
-- 100 Go Mistakes and How to Avoid Them
+评估：能说清楚机制和边界；能解释失败模式；能把设计落到代码、测试或 profile；能在综合项目中做出取舍并说明理由。

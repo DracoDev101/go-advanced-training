@@ -4,194 +4,180 @@
 
 完成本课后，学习者应该能够：
 
-- 写可信 benchmark。
-- 使用 pprof 定位 CPU 与内存热点。
-- 区分 ns/op、B/op、allocs/op。
-- 建立性能优化前后对比方法。
-- 将本节主题落到 Production Job Runner 的生产设计中。
+- 写出可信 Go benchmark，避免编译器优化、输入不稳定、I/O 干扰和数据规模失真。
+- 解释 `ns/op`、`B/op`、`allocs/op`、吞吐、tail latency 的差异。
+- 使用 CPU、heap、allocs、block、mutex profile 定位不同类型瓶颈。
+- 用 `benchstat` 比较优化前后结果，而不是凭单次 benchmark 下结论。
+- 在 Production Job Runner 中建立“指标发现 → profile 定位 → benchmark 验证 → 回归保护”的性能闭环。
 
 ---
 
 ## 关键问题
 
-1. 这个主题解决的生产问题是什么？
-2. Go 标准库或主流生态提供了哪些基础能力？
-3. 这个能力的默认行为、边界和失败模式是什么？
-4. 如何通过测试、benchmark、profile 或故障演练验证设计？
-5. 在 Production Job Runner 中，这个主题应该如何落地？
+1. 什么样的 benchmark 是不可信的？
+2. 为什么微基准快，不代表接口整体快？
+3. CPU profile 中 flat、cum 分别代表什么？
+4. heap profile 和 allocs profile 有什么区别？
+5. 什么时候用 benchmark，什么时候用 load test，什么时候用 production profile？
+6. 性能优化如何避免改坏可读性和可靠性？
 
 ---
 
 ## 核心结论
 
-- 本节关键词：**benchmark、pprof、CPU profile、heap profile、allocs/op、optimization**。
-- 生产级 Go 课程不只讲 API 用法，更要讲设计边界、故障模式和观测方式。
-- 所有工程决策都应能回答：为什么这样设计、失败时如何表现、如何验证、如何回滚。
-- 简单实现优先；只有在指标证明瓶颈存在时，再引入复杂优化。
-- 本节配套 Lab 提供最小可运行实验，用于把抽象概念变成可观察现象。
+- benchmark 是实验，不是仪式；必须有稳定输入、明确假设、可重复对比。
+- pprof 的作用是缩小搜索空间：先找热点，再决定是否优化。
+- CPU 热点、分配热点、锁等待、阻塞等待是四种不同问题，不能用同一个 profile 判断。
+- 优化必须有 baseline 和 after，并用 `benchstat` 或线上指标证明收益。
+- 没有指标的性能优化通常是在制造复杂度。
 
 ---
 
-## 设计哲学
+## 1. Benchmark 基本形态和指标含义
 
-Go 的工程哲学偏向直接、可读、可组合。对于 **Benchmark 与 pprof 性能诊断**，不要把问题理解成“选一个库”或“套一个模式”，而要从系统边界出发：
-
-```text
-输入是什么？
-输出是什么？
-谁拥有状态？
-失败如何传播？
-超时和取消如何生效？
-如何观测？
-如何测试？
+```go
+func BenchmarkEncodeJob(b *testing.B) {
+    job := sampleJob()
+    b.ReportAllocs()
+    for i := 0; i < b.N; i++ {
+        _, err := EncodeJob(job)
+        if err != nil {
+            b.Fatal(err)
+        }
+    }
+}
 ```
-
-好的 Go 代码通常不是抽象层数最多的代码，而是边界清楚、依赖方向稳定、失败路径明确的代码。
-
----
-
-## 底层机制与核心概念
-
-### 1. 语义边界
-
-先明确本节主题的语义边界。不要让一个组件同时承担过多职责。比如：
-
-- API 层负责协议、校验、错误映射。
-- Service 层负责业务编排和事务边界。
-- Repository 层负责持久化细节。
-- Worker 层负责异步执行和生命周期。
-- Observability 层负责日志、指标、追踪，而不是业务决策。
-
-### 2. 失败模式
-
-每个生产组件都要列出失败模式：
-
-```text
-超时
-取消
-并发冲突
-资源耗尽
-下游错误
-部分成功
-重复执行
-观测缺失
-```
-
-### 3. 验证方式
-
-验证不能只靠“手动跑一下”。应至少包含：
 
 ```bash
-go test ./...
-go test -race ./...
-go test -bench=. -benchmem ./...
-go vet ./...
+go test -bench=BenchmarkEncodeJob -benchmem ./...
 ```
 
-涉及性能或 runtime 的主题，还应加入 pprof、trace、GODEBUG 或故障注入。
+| 指标 | 含义 |
+|---|---|
+| `ns/op` | 每次操作平均耗时 |
+| `B/op` | 每次操作分配字节数 |
+| `allocs/op` | 每次操作分配次数 |
+| `-8` | GOMAXPROCS / CPU 并行信息，不是 goroutine 数 |
 
 ---
 
-## 生产实践
+## 2. 常见 benchmark 陷阱
 
-### Production Job Runner 落地点
+编译器把结果优化掉：应保存到包级 `sink`。把准备数据算进 benchmark：应准备后 `b.ResetTimer()`。随机输入导致结果不稳定：benchmark 输入要固定。微基准替代系统压测：`EncodeJob` 很快不代表 HTTP endpoint 快，端到端还有 middleware、DB、队列、日志、网络。
 
-在综合项目中，本节内容应落到以下问题：
+---
 
-- API/worker/repository 的边界是否清晰？
-- context 是否全链路传递？
-- timeout、retry、幂等和错误映射是否明确？
-- 是否有足够指标判断系统健康？
-- 是否有测试证明关键失败路径？
-- 是否能在部署时快速回滚？
+## 3. 用 benchstat 做优化前后对比
 
-### 工程 checklist
+```bash
+go test -bench=. -benchmem -count=10 ./... > old.txt
+# 修改代码
+go test -bench=. -benchmem -count=10 ./... > new.txt
+benchstat old.txt new.txt
+```
+
+看三件事：变化是否显著；`ns/op` 是否改善；`B/op`、`allocs/op` 是否下降或可解释。不要用单次运行的 5% 波动做决策。
+
+---
+
+## 4. pprof：不同 profile 回答不同问题
+
+| Profile | 回答的问题 | 典型命令 |
+|---|---|---|
+| CPU | CPU 时间花在哪里 | `go test -cpuprofile cpu.out` |
+| heap | 当前存活对象在哪里 | `-memprofile mem.out` |
+| allocs | 历史分配热点在哪里 | `/debug/pprof/allocs` |
+| goroutine | goroutine 在哪里 | `/debug/pprof/goroutine?debug=2` |
+| block | 同步阻塞在哪里 | `-blockprofile block.out` |
+| mutex | 锁等待在哪里 | `-mutexprofile mutex.out` |
+| trace | 调度、网络、同步时间线 | `-trace trace.out` |
+
+---
+
+## 5. CPU profile 怎么读
+
+```bash
+go test -run=^$ -bench=BenchmarkExecuteJob -cpuprofile cpu.out ./...
+go tool pprof cpu.out
+```
+
+常用命令：`top`、`list ExecuteJob`、`web`、`peek json`。
+
+| 字段 | 含义 |
+|---|---|
+| flat | 函数自身消耗的 CPU |
+| cum | 函数自身 + 子调用累计 CPU |
+
+`flat` 高说明函数内部计算重；`cum` 高但 `flat` 低说明下游重；`runtime.mallocgc` 高通常表示分配导致 CPU 消耗。
+
+---
+
+## 6. Heap / allocs profile 怎么读
+
+```bash
+go test -run=^$ -bench=BenchmarkExecuteJob -benchmem -memprofile mem.out ./...
+go tool pprof -alloc_space mem.out
+go tool pprof -inuse_space mem.out
+```
+
+| 视角 | 含义 | 用途 |
+|---|---|---|
+| `alloc_space` | 历史累计分配 | 找分配速率热点 |
+| `inuse_space` | 当前仍存活 | 找泄漏/长期持有 |
+
+如果 `alloc_space` 高但 `inuse_space` 不高，说明对象很快被回收，问题是 GC 压力而不是泄漏。
+
+---
+
+## 7. 从线上指标到 profile 的排查路径
 
 ```text
-是否有单元测试？
-是否有 race detector 验证？
-是否有 benchmark 或 profile？
-是否记录 request_id / job_id / trace_id？
-是否有健康检查？
-是否有容量和超时配置？
-是否有故障演练？
+1. 指标发现：P99 上升 / CPU 高 / RSS 高 / queue depth 高
+2. 分类：CPU bound? memory pressure? lock contention? downstream blocking?
+3. 采集对应 profile
+4. 定位 top hotspot
+5. 写 benchmark 或 regression test 重现
+6. 优化最小代码路径
+7. benchstat + 线上指标验证
 ```
+
+不要反过来：先打开 pprof，看哪里显眼就改哪里。
+
+---
+
+## 8. Production Job Runner 落地
+
+关键 benchmark：job payload decode/validate、job claim SQL、worker execute wrapper、result serialization、event publish envelope、structured log fields construction。
+
+关键 profile：CPU 看 worker 是否被 JSON/压缩占满；heap 看 result 是否长期持有大对象；block 看 worker 是否卡在队列/DB pool；mutex 看状态缓存或 metrics registry 是否锁竞争。
+
+性能预算示例：SubmitJob handler P95 < 50ms；ClaimJob DB tx P95 < 20ms；Worker wrapper overhead < 1ms/job；Result summary <= 32KB。
 
 ---
 
 ## 代码实验
 
-配套实验目录：
-
-```text
-labs/12-benchmark-pprof/
-```
-
-运行：
+配套目录：`labs/12-benchmark-pprof/`
 
 ```bash
-cd labs/12-benchmark-pprof
-go test ./...
-go test -race ./...
-go test -bench=. -benchmem ./...
-go vet ./...
+go test -bench=. -benchmem -count=10 ./... > old.txt
+go test -run=^$ -bench=. -cpuprofile cpu.out -memprofile mem.out ./...
+go tool pprof -http=:0 cpu.out
+go tool pprof -http=:0 -alloc_space mem.out
 ```
 
-实验目标：
+---
 
-- 用最小代码复现本节核心机制。
-- 用测试固定正确行为。
-- 用 benchmark 或 profile 建立优化前后的可观察对比。
-- 总结生产启发。
+## 常见误区与故障案例
+
+误区：只看 `ns/op`；benchmark 输入太小；用 `fmt.Sprintf`、`time.Now`、随机数污染热路径；没有 `-count` 和 `benchstat` 就比较 3% 差异；为微小性能牺牲边界清晰。
+
+案例：接口 P99 高，开发者优化 JSON 编码，benchmark 提升 20%，线上无变化。线上 block profile 显示大量时间等待 DB connection pool。真实问题是 DB pool 太小和事务持有时间过长。
 
 ---
 
-## 常见误区
+## 作业与评估
 
-1. 只记住 API，不理解边界。
-2. 只写 happy path，不测试失败路径。
-3. 只看平均延迟，不看 tail latency 和错误率。
-4. 用复杂模式掩盖需求不清。
-5. 没有指标就开始优化。
+作业：写 bad benchmark 和 good benchmark；对比 `alloc_space` 与 `inuse_space`；为 Production Job Runner 写 5 个性能预算和对应 profile 方法。
 
----
-
-## 故障案例
-
-### 案例：设计中缺少边界和观测
-
-症状：线上出现延迟升高或任务堆积，但无法判断是 API、DB、队列、worker 还是下游服务导致。
-
-根因：组件边界不清，日志缺少 job_id/request_id，指标缺少 queue depth、duration、error code。
-
-修复：补齐结构化日志、关键指标、错误分类和 context 传播，并增加失败路径测试。
-
----
-
-## 作业
-
-1. 阅读本节 Lab，运行所有测试和 benchmark。
-2. 为 Lab 增加一个失败路径测试。
-3. 写一段设计说明：这个主题在 Production Job Runner 中如何落地。
-4. 列出 3 个可观测指标和 2 个故障演练场景。
-5. 对比两种实现方案，说明你会选择哪一个以及原因。
-
----
-
-## 评估标准
-
-- 能解释本节核心概念和设计边界。
-- 能写出可测试的最小实现。
-- 能识别至少三个生产失败模式。
-- 能说明如何观测和验证。
-- 能将本节内容映射到综合项目。
-
----
-
-## 延伸阅读
-
-- Go standard library documentation
-- Effective Go
-- Go Code Review Comments
-- 100 Go Mistakes and How to Avoid Them
-- OpenTelemetry / pprof / runtime documentation as applicable
+评估：能写可信 benchmark；能用 pprof top/list 定位热点；能解释 CPU、heap、allocs、block、mutex profile 的差异；能用 benchstat 证明优化收益。

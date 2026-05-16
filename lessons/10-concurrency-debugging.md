@@ -4,194 +4,242 @@
 
 完成本课后，学习者应该能够：
 
-- 使用 race detector 定位 data race。
-- 识别 deadlock、goroutine leak 和阻塞热点。
-- 采集 goroutine dump、block profile、mutex profile。
-- 建立并发故障排查 checklist。
-- 将本节主题落到 Production Job Runner 的生产设计中。
+- 区分 **data race、race condition、deadlock、goroutine leak、lock contention、channel blocking**。
+- 用 `go test -race`、goroutine dump、block profile、mutex profile、`go tool trace` 建立并发故障证据链。
+- 读懂 race detector 报告中的读写栈、goroutine 创建栈和冲突变量。
+- 为 worker、channel、mutex、context 设计可验证的生命周期边界。
+- 在 Production Job Runner 中定位“任务不消费、CPU 不高但延迟高、goroutine 越跑越多”等问题。
 
 ---
 
 ## 关键问题
 
-1. 这个主题解决的生产问题是什么？
-2. Go 标准库或主流生态提供了哪些基础能力？
-3. 这个能力的默认行为、边界和失败模式是什么？
-4. 如何通过测试、benchmark、profile 或故障演练验证设计？
-5. 在 Production Job Runner 中，这个主题应该如何落地？
+1. 为什么没有 data race 的程序仍然可能出现业务竞态？
+2. `go test -race` 能发现什么，不能发现什么？
+3. goroutine leak 的本质是“谁在等待谁”？
+4. deadlock、长期阻塞、锁竞争在 profile 上分别长什么样？
+5. 线上出现 queue depth 上升但 CPU 很低时，优先看哪些证据？
+6. 如何把并发 bug 从“偶现”变成稳定可复现的测试？
 
 ---
 
 ## 核心结论
 
-- 本节关键词：**race detector、goroutine dump、block profile、mutex profile、deadlock、leak**。
-- 生产级 Go 课程不只讲 API 用法，更要讲设计边界、故障模式和观测方式。
-- 所有工程决策都应能回答：为什么这样设计、失败时如何表现、如何验证、如何回滚。
-- 简单实现优先；只有在指标证明瓶颈存在时，再引入复杂优化。
-- 本节配套 Lab 提供最小可运行实验，用于把抽象概念变成可观察现象。
+- **并发 Debugging 的第一步不是猜锁，而是分类症状**：错误结果、卡死、变慢、资源增长，对应不同工具。
+- **race detector 只证明发生了未同步的并发访问**；它不证明业务逻辑正确，也不能覆盖没有执行到的路径。
+- **goroutine leak 通常是生命周期协议错误**：发送方没人接、接收方没人关、context 没传、worker 没退出。
+- **block profile 看等待 channel / select / cond 的时间；mutex profile 看锁竞争导致的等待时间**。
+- 生产排查要把 **goroutine dump + profile + 指标 + 日志字段** 串起来，而不是只看单个截图。
 
 ---
 
-## 设计哲学
+## 1. 问题分类：同样是“并发出问题”，其实是四类问题
 
-Go 的工程哲学偏向直接、可读、可组合。对于 **并发 Debugging 与 Race Detector**，不要把问题理解成“选一个库”或“套一个模式”，而要从系统边界出发：
+| 症状 | 常见根因 | 主要工具 |
+|---|---|---|
+| 结果偶尔不对 | data race、业务竞态、循环变量捕获 | `go test -race`、定向单测 |
+| 程序卡住 | channel 双方不匹配、锁顺序反转、WaitGroup 计数错误 | goroutine dump、block profile |
+| 延迟升高但 CPU 不高 | 锁竞争、channel 阻塞、连接池耗尽 | mutex/block profile、runtime trace |
+| 内存/goroutine 持续增长 | goroutine leak、timer leak、未关闭 response body | goroutine/heap profile、指标趋势 |
 
-```text
-输入是什么？
-输出是什么？
-谁拥有状态？
-失败如何传播？
-超时和取消如何生效？
-如何观测？
-如何测试？
-```
-
-好的 Go 代码通常不是抽象层数最多的代码，而是边界清楚、依赖方向稳定、失败路径明确的代码。
+生产里更常见的不是全局 deadlock，而是 **部分 worker 卡住、吞吐下降、队列堆积、泄漏缓慢增长**。
 
 ---
 
-## 底层机制与核心概念
+## 2. Data race vs Race condition
 
-### 1. 语义边界
+### Data race
 
-先明确本节主题的语义边界。不要让一个组件同时承担过多职责。比如：
+两个 goroutine 并发访问同一内存地址，至少一个是写，并且没有 happens-before 关系。
 
-- API 层负责协议、校验、错误映射。
-- Service 层负责业务编排和事务边界。
-- Repository 层负责持久化细节。
-- Worker 层负责异步执行和生命周期。
-- Observability 层负责日志、指标、追踪，而不是业务决策。
+```go
+var n int
 
-### 2. 失败模式
-
-每个生产组件都要列出失败模式：
-
-```text
-超时
-取消
-并发冲突
-资源耗尽
-下游错误
-部分成功
-重复执行
-观测缺失
+go func() { n++ }()
+go func() { n++ }()
 ```
 
-### 3. 验证方式
+这类问题由 Go race detector 直接定位。
 
-验证不能只靠“手动跑一下”。应至少包含：
+### Race condition
+
+程序没有违反 memory model，但业务结果依赖不稳定时序。
+
+```go
+if repo.Status(jobID) == "pending" {
+    repo.MarkRunning(jobID)
+}
+```
+
+每个 DB 调用本身都线程安全，但两个 worker 可能同时看到 `pending`，导致重复执行。修复方式不是 Go mutex，而是 DB 条件更新：
+
+```sql
+UPDATE jobs
+SET status = 'running'
+WHERE id = $1 AND status = 'pending';
+```
+
+**重点**：race detector 解决不了分布式/数据库层面的竞态，它只看进程内内存访问。
+
+---
+
+## 3. Race Detector：怎么用、怎么看、有什么边界
 
 ```bash
-go test ./...
 go test -race ./...
-go test -bench=. -benchmem ./...
-go vet ./...
+go test -race -run TestName -count=100 ./...
+go test -race -run TestName -shuffle=on ./...
 ```
 
-涉及性能或 runtime 的主题，还应加入 pprof、trace、GODEBUG 或故障注入。
+典型报告包含三段：
+
+```text
+WARNING: DATA RACE
+Read at 0x... by goroutine 8:
+  package.(*Cache).Get()
+
+Previous write at 0x... by goroutine 7:
+  package.(*Cache).Set()
+
+Goroutine 8 created at:
+  package.TestCache()
+```
+
+读报告顺序：
+
+1. 找冲突地址对应的变量。
+2. 看 read/write 栈，确认哪个路径没有锁或 atomic。
+3. 看 goroutine created at，确认生命周期来源。
+4. 修复后用 `-race -count=100` 验证。
+
+边界：只检查运行到的代码路径；不能发现业务竞态、死锁、泄漏；有明显性能开销，不适合长期线上开启。
 
 ---
 
-## 生产实践
+## 4. Goroutine leak：定位“谁在等谁”
 
-### Production Job Runner 落地点
+典型泄漏：发送方被卡住。
 
-在综合项目中，本节内容应落到以下问题：
+```go
+func start(out chan<- Result) {
+    go func() {
+        out <- slowCall() // 如果没人接收，这个 goroutine 永远不退出
+    }()
+}
+```
 
-- API/worker/repository 的边界是否清晰？
-- context 是否全链路传递？
-- timeout、retry、幂等和错误映射是否明确？
-- 是否有足够指标判断系统健康？
-- 是否有测试证明关键失败路径？
-- 是否能在部署时快速回滚？
+修复原则：
 
-### 工程 checklist
+```go
+select {
+case out <- result:
+case <-ctx.Done():
+    return
+}
+```
+
+生产排查：
+
+```bash
+curl http://localhost:6060/debug/pprof/goroutine?debug=2 > goroutine.txt
+go tool pprof http://localhost:6060/debug/pprof/goroutine
+```
+
+看 dump 时先按栈签名聚类：
 
 ```text
-是否有单元测试？
-是否有 race detector 验证？
-是否有 benchmark 或 profile？
-是否记录 request_id / job_id / trace_id？
-是否有健康检查？
-是否有容量和超时配置？
-是否有故障演练？
+2000 goroutines blocked on chan send at worker.go:83
+500 goroutines blocked on database/sql.(*DB).conn
 ```
+
+---
+
+## 5. Deadlock、block profile、mutex profile
+
+全局 deadlock 才会触发：
+
+```text
+fatal error: all goroutines are asleep - deadlock!
+```
+
+但生产里更常见的是 **局部 deadlock**：部分 goroutine 永远等待，进程仍然活着。
+
+Block profile 观察 goroutine 在同步原语上等待的时间：
+
+```bash
+go test -run TestX -blockprofile block.out ./...
+go tool pprof -http=:0 block.out
+```
+
+Mutex profile 观察锁等待：
+
+```bash
+go test -run TestX -mutexprofile mutex.out ./...
+go tool pprof -http=:0 mutex.out
+```
+
+判断原则：CPU 不高、延迟高、mutex profile 高 → 锁竞争；block profile 高 → channel/cond/wait 设计问题。
+
+---
+
+## 6. go tool trace 看什么
+
+```bash
+go test -run TestX -trace trace.out ./...
+go tool trace trace.out
+```
+
+重点看：Goroutine analysis、Network blocking、Synchronization blocking、Scheduler latency。`trace` 不是第一工具，优先顺序通常是：指标 → goroutine dump → pprof → trace。
+
+---
+
+## 7. Production Job Runner 落地
+
+worker 生命周期协议：
+
+```text
+start(ctx) -> claim job -> execute with timeout -> persist result -> publish event -> exit when ctx canceled
+```
+
+必须有的观测字段：`job_id, worker_id, attempt, status, queue_depth, duration_ms, error_kind`。
+
+必须有的测试：context cancel 后 worker 退出；job channel close 后 worker 退出；下游阻塞时不会泄漏 goroutine；同一个 job 不会被两个 worker 同时 claim。
 
 ---
 
 ## 代码实验
 
-配套实验目录：
+配套目录：`labs/10-concurrency-debugging/`
 
-```text
-labs/10-concurrency-debugging/
-```
-
-运行：
+建议升级为专项实验：
 
 ```bash
-cd labs/10-concurrency-debugging
-go test ./...
-go test -race ./...
-go test -bench=. -benchmem ./...
-go vet ./...
+go test -race -run TestUnsafeCounter ./...
+go test -run TestGoroutineLeak -count=1 ./...
+go test -run TestBlockedChannel -blockprofile block.out ./...
+go test -run TestMutexContention -mutexprofile mutex.out ./...
+go tool pprof -http=:0 block.out
 ```
-
-实验目标：
-
-- 用最小代码复现本节核心机制。
-- 用测试固定正确行为。
-- 用 benchmark 或 profile 建立优化前后的可观察对比。
-- 总结生产启发。
 
 ---
 
 ## 常见误区
 
-1. 只记住 API，不理解边界。
-2. 只写 happy path，不测试失败路径。
-3. 只看平均延迟，不看 tail latency 和错误率。
-4. 用复杂模式掩盖需求不清。
-5. 没有指标就开始优化。
+1. 以为 `-race` 通过就代表并发逻辑正确。
+2. 用 `time.Sleep` 等 goroutine 结束，导致测试偶现。
+3. 只在发送方关闭 channel，忘记接收方退出协议。
+4. 锁竞争时盲目换 atomic，反而破坏不变量。
 
 ---
 
 ## 故障案例
 
-### 案例：设计中缺少边界和观测
-
-症状：线上出现延迟升高或任务堆积，但无法判断是 API、DB、队列、worker 还是下游服务导致。
-
-根因：组件边界不清，日志缺少 job_id/request_id，指标缺少 queue depth、duration、error code。
-
-修复：补齐结构化日志、关键指标、错误分类和 context 传播，并增加失败路径测试。
+现象：`/healthz` 正常，CPU 低，queue depth 持续升高。goroutine dump 显示大量 worker 卡在 `results <- r`；block profile 指向同一行。根因是结果 channel 没有消费者，发送路径没有 `ctx.Done()` 分支。修复：发送结果时使用 `select`，关闭 worker 时先停止生产，再 drain 或丢弃结果，并记录 drop 指标。
 
 ---
 
-## 作业
+## 作业与评估
 
-1. 阅读本节 Lab，运行所有测试和 benchmark。
-2. 为 Lab 增加一个失败路径测试。
-3. 写一段设计说明：这个主题在 Production Job Runner 中如何落地。
-4. 列出 3 个可观测指标和 2 个故障演练场景。
-5. 对比两种实现方案，说明你会选择哪一个以及原因。
+作业：增加一个泄漏 goroutine 的版本和修复版本；用 block profile 证明阻塞点变化；写一个 DB claim job 的并发测试。
 
----
-
-## 评估标准
-
-- 能解释本节核心概念和设计边界。
-- 能写出可测试的最小实现。
-- 能识别至少三个生产失败模式。
-- 能说明如何观测和验证。
-- 能将本节内容映射到综合项目。
-
----
-
-## 延伸阅读
-
-- Go standard library documentation
-- Effective Go
-- Go Code Review Comments
-- 100 Go Mistakes and How to Avoid Them
-- OpenTelemetry / pprof / runtime documentation as applicable
+评估：能读懂 race detector 报告；能从 goroutine dump 聚类定位阻塞点；能区分 block profile 和 mutex profile。

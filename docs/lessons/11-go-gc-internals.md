@@ -4,194 +4,173 @@
 
 完成本课后，学习者应该能够：
 
-- 解释 Go GC 的并发三色标记模型。
-- 理解 write barrier 与 STW 的角色。
-- 使用 GODEBUG=gctrace 观察 GC。
-- 判断何时调 GOGC，何时应减少分配。
-- 将本节主题落到 Production Job Runner 的生产设计中。
+- 解释 Go GC 为什么是并发、三色标记、非分代、非移动的 GC。
+- 读懂 `GODEBUG=gctrace=1` 中 heap、goal、STW、mark assist 等关键信号。
+- 区分 **内存泄漏、分配速率过高、短期尖峰、GC CPU 过高、RSS 不下降**。
+- 判断应优先减少分配、复用对象、调 `GOGC`，还是设置 `GOMEMLIMIT`。
+- 在 Production Job Runner 中控制 job payload、日志字段、批处理、缓存带来的 GC 压力。
 
 ---
 
 ## 关键问题
 
-1. 这个主题解决的生产问题是什么？
-2. Go 标准库或主流生态提供了哪些基础能力？
-3. 这个能力的默认行为、边界和失败模式是什么？
-4. 如何通过测试、benchmark、profile 或故障演练验证设计？
-5. 在 Production Job Runner 中，这个主题应该如何落地？
+1. Go GC 到底在回收什么？栈、堆、全局变量分别如何参与？
+2. 为什么“减少分配速率”通常比“调大 GOGC”更重要？
+3. `GOGC=100` 表示什么？它不是“每 100ms GC 一次”。
+4. STW 是否还重要？现代 Go 的主要 GC 成本在哪里？
+5. `GOMEMLIMIT` 解决什么问题，又可能带来什么副作用？
+6. 为什么 RSS 不下降不一定代表 Go 对象泄漏？
 
 ---
 
 ## 核心结论
 
-- 本节关键词：**GC、GOGC、gctrace、allocation、STW、heap**。
-- 生产级 Go 课程不只讲 API 用法，更要讲设计边界、故障模式和观测方式。
-- 所有工程决策都应能回答：为什么这样设计、失败时如何表现、如何验证、如何回滚。
-- 简单实现优先；只有在指标证明瓶颈存在时，再引入复杂优化。
-- 本节配套 Lab 提供最小可运行实验，用于把抽象概念变成可观察现象。
+- Go GC 的核心优化目标不是“零暂停”，而是 **在低暂停和可控 CPU 成本之间平衡**。
+- 生产中最常见的问题不是 GC 算法不行，而是代码制造了过高的 **allocation rate**。
+- `GOGC` 控制下一轮 GC 目标堆大小：活跃堆越大，允许增长越多；调大它通常用内存换 CPU。
+- `GOMEMLIMIT` 是软内存限制，适合容器环境，但限制太紧会导致频繁 GC 和吞吐下降。
+- 优化顺序：**profile 证明分配热点 → 减少分配/缩短对象生命周期 → 再调 GOGC/GOMEMLIMIT**。
 
 ---
 
-## 设计哲学
+## 1. Go GC 回收的对象：先理解堆
 
-Go 的工程哲学偏向直接、可读、可组合。对于 **Go GC 原理与调优边界**，不要把问题理解成“选一个库”或“套一个模式”，而要从系统边界出发：
+Go 变量不等于堆对象。变量可能在栈上，也可能逃逸到堆上。
 
-```text
-输入是什么？
-输出是什么？
-谁拥有状态？
-失败如何传播？
-超时和取消如何生效？
-如何观测？
-如何测试？
+```go
+func f() *User {
+    u := User{Name: "a"}
+    return &u // u 逃逸到堆
+}
 ```
 
-好的 Go 代码通常不是抽象层数最多的代码，而是边界清楚、依赖方向稳定、失败路径明确的代码。
+GC 主要管理堆对象。栈会随着 goroutine 生命周期增长/收缩，栈上的指针会作为 root 被扫描。
+
+GC roots 包括：goroutine 栈上的指针、全局变量中的指针、runtime 内部结构中的指针、finalizer/cgo 等特殊 root。
 
 ---
 
-## 底层机制与核心概念
+## 2. 三色标记和 write barrier
 
-### 1. 语义边界
-
-先明确本节主题的语义边界。不要让一个组件同时承担过多职责。比如：
-
-- API 层负责协议、校验、错误映射。
-- Service 层负责业务编排和事务边界。
-- Repository 层负责持久化细节。
-- Worker 层负责异步执行和生命周期。
-- Observability 层负责日志、指标、追踪，而不是业务决策。
-
-### 2. 失败模式
-
-每个生产组件都要列出失败模式：
+三色抽象：
 
 ```text
-超时
-取消
-并发冲突
-资源耗尽
-下游错误
-部分成功
-重复执行
-观测缺失
+白色：尚未发现，最终可能被回收
+灰色：已发现，但它指向的对象还没扫描完
+黑色：已发现，并且它指向的对象也扫描完
 ```
 
-### 3. 验证方式
+Go GC 是并发标记：应用 goroutine 和 GC 同时运行。应用在 GC 标记期间仍然会修改指针：
 
-验证不能只靠“手动跑一下”。应至少包含：
+```go
+obj.child = other
+```
+
+如果没有屏障，可能出现黑对象指向白对象，但白对象没有被扫描到，导致活对象被错误回收。write barrier 的作用是让指针写入在 GC 期间被 runtime 记录。
+
+生产理解：大量指针对象、复杂对象图、频繁指针写入会增加扫描和屏障成本；`[]byte` 这类无指针数据比 `[]*T` 对 GC 更友好。
+
+---
+
+## 3. GC pacing、GOGC 与 allocation rate
+
+`GOGC=100` 的含义：下一轮 GC 目标堆大小大约是：
+
+```text
+goal = live_heap * (1 + GOGC/100)
+```
+
+如果上一轮 GC 后 live heap 是 200MB，`GOGC=100`，下一轮目标约 400MB。
+
+| 指标 | 含义 | 优化方向 |
+|---|---|---|
+| live heap | GC 后仍然存活的对象 | 减少长生命周期对象、缓存上限 |
+| allocation rate | 单位时间分配量 | 减少临时对象、复用 buffer |
+| GC CPU fraction | GC 消耗 CPU 比例 | 降低分配或调高 GOGC |
+| heap goal | 下一轮 GC 目标 | 由 live heap 和 GOGC 决定 |
+
+如果 allocation rate 很高，GC 会被迫更频繁地工作。调大 GOGC 只能降低频率，但会增加内存占用。
+
+---
+
+## 4. Mark assist：为什么业务 goroutine 会被迫帮 GC
+
+当程序分配速度超过 GC 进度时，runtime 会让正在分配的 goroutine 做一部分标记工作，这叫 mark assist。
+
+表现：请求 tail latency 升高；CPU profile 中出现 GC 相关栈；gctrace 中 GC CPU 压力变大。含义不是“GC 卡住了程序”，而是程序分配太快，欠了 GC 的账。
+
+---
+
+## 5. 读懂 gctrace
 
 ```bash
-go test ./...
-go test -race ./...
-go test -bench=. -benchmem ./...
-go vet ./...
+GODEBUG=gctrace=1 go test -run TestAllocPressure ./...
+GODEBUG=gctrace=1 go run ./cmd/server
 ```
 
-涉及性能或 runtime 的主题，还应加入 pprof、trace、GODEBUG 或故障注入。
+典型输出：
+
+```text
+gc 12 @4.232s 3%: 0.08+12+0.05 ms clock, 0.6+4.1/20/0+0.4 ms cpu, 64->80->40 MB, 82 MB goal, 8 P
+```
+
+| 片段 | 关注点 |
+|---|---|
+| `gc 12` | 第几次 GC，频率是否异常 |
+| `3%` | GC CPU 占比 |
+| `0.08+12+0.05 ms` | STW + concurrent mark + STW |
+| `64->80->40 MB` | GC 前、GC 峰值、GC 后 live heap |
+| `82 MB goal` | 下一轮目标堆 |
+
+判断：`after GC` 持续上升可能是真实存活对象增长或泄漏；`before GC` 很高但 `after GC` 稳定说明分配速率高，但不一定泄漏。
 
 ---
 
-## 生产实践
+## 6. GOMEMLIMIT：容器环境下的软限制
 
-### Production Job Runner 落地点
-
-在综合项目中，本节内容应落到以下问题：
-
-- API/worker/repository 的边界是否清晰？
-- context 是否全链路传递？
-- timeout、retry、幂等和错误映射是否明确？
-- 是否有足够指标判断系统健康？
-- 是否有测试证明关键失败路径？
-- 是否能在部署时快速回滚？
-
-### 工程 checklist
-
-```text
-是否有单元测试？
-是否有 race detector 验证？
-是否有 benchmark 或 profile？
-是否记录 request_id / job_id / trace_id？
-是否有健康检查？
-是否有容量和超时配置？
-是否有故障演练？
+```bash
+GOMEMLIMIT=512MiB ./server
 ```
+
+适用：Kubernetes/container 有明确内存 limit，希望 Go runtime 在接近 limit 前更积极 GC。
+
+风险：limit 设得过低会导致 GC 频繁运行，吞吐下降；它限制的是 Go runtime 管理的内存目标，不等于进程 RSS 的硬上限；cgo、mmap、文件缓存等不完全受它控制。
+
+---
+
+## 7. Production Job Runner 落地
+
+GC 压力来源：job payload 过大；worker 每次执行构造大量临时 JSON/map/log fields；无上限缓存保存 job result；批处理一次拉太多 job。
+
+设计原则：payload 外置化；batch 有上限；日志字段固定；缓存有容量；保留受控 `/debug/pprof`。
 
 ---
 
 ## 代码实验
 
-配套实验目录：
+配套目录：`labs/11-go-gc-internals/`
 
-```text
-labs/11-go-gc-internals/
-```
-
-运行：
+建议升级命令：
 
 ```bash
-cd labs/11-go-gc-internals
-go test ./...
-go test -race ./...
 go test -bench=. -benchmem ./...
-go vet ./...
+GODEBUG=gctrace=1 go test -bench=BenchmarkAllocHeavy -run=^$ ./...
+go test -run=^$ -bench=BenchmarkAllocHeavy -memprofile mem.out ./...
+go tool pprof -http=:0 mem.out
 ```
 
-实验目标：
+---
 
-- 用最小代码复现本节核心机制。
-- 用测试固定正确行为。
-- 用 benchmark 或 profile 建立优化前后的可观察对比。
-- 总结生产启发。
+## 常见误区与故障案例
+
+误区：看到 RSS 不下降就断言泄漏；把 `GOGC` 当成时间间隔；优先调 GC 参数而不是减少分配；滥用 `sync.Pool` 保存业务状态。
+
+案例：任务系统 P99 周期性抖动，gctrace 显示 GC 频率升高，heap profile 指向 job result JSON 序列化。修复：固定日志字段结构，限制 result 摘要长度，批量处理加上限，优化后 `allocs/op` 和 GC 频率下降。
 
 ---
 
-## 常见误区
+## 作业与评估
 
-1. 只记住 API，不理解边界。
-2. 只写 happy path，不测试失败路径。
-3. 只看平均延迟，不看 tail latency 和错误率。
-4. 用复杂模式掩盖需求不清。
-5. 没有指标就开始优化。
+作业：用 benchmark 对比 `map[string]any` 日志字段和固定 struct 字段；解释一次 gctrace 输出；写 Production Job Runner 内存预算。
 
----
-
-## 故障案例
-
-### 案例：设计中缺少边界和观测
-
-症状：线上出现延迟升高或任务堆积，但无法判断是 API、DB、队列、worker 还是下游服务导致。
-
-根因：组件边界不清，日志缺少 job_id/request_id，指标缺少 queue depth、duration、error code。
-
-修复：补齐结构化日志、关键指标、错误分类和 context 传播，并增加失败路径测试。
-
----
-
-## 作业
-
-1. 阅读本节 Lab，运行所有测试和 benchmark。
-2. 为 Lab 增加一个失败路径测试。
-3. 写一段设计说明：这个主题在 Production Job Runner 中如何落地。
-4. 列出 3 个可观测指标和 2 个故障演练场景。
-5. 对比两种实现方案，说明你会选择哪一个以及原因。
-
----
-
-## 评估标准
-
-- 能解释本节核心概念和设计边界。
-- 能写出可测试的最小实现。
-- 能识别至少三个生产失败模式。
-- 能说明如何观测和验证。
-- 能将本节内容映射到综合项目。
-
----
-
-## 延伸阅读
-
-- Go standard library documentation
-- Effective Go
-- Go Code Review Comments
-- 100 Go Mistakes and How to Avoid Them
-- OpenTelemetry / pprof / runtime documentation as applicable
+评估：能解释 GOGC、live heap、allocation rate 的关系；能用 gctrace 判断泄漏还是分配速率高；能提出减少 GC 压力的代码级和架构级方案。
