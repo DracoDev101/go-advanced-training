@@ -57,7 +57,9 @@ nav:
       - "Lesson 22：部署与运行": lessons/22-deployment-operations.md
       - "Lesson 23：系统设计案例": lessons/23-system-design-cases.md
       - "Lesson 24：综合项目 Review": lessons/24-final-project-review.md
-  - 实验: labs/index.md
+  - 实验:
+      - 实验说明: labs/index.md
+      - "Lab 2：值、指针与逃逸分析": labs/02-escape-analysis.md
   - 综合项目:
       - Production Job Runner: projects/production-job-runner.md
   - 参考资料: references/reading-list.md

@@ -13,6 +13,12 @@ labs/
   05-error-handling/
 ```
 
+## 已有实验
+
+- [Lab 2：值、指针与逃逸分析](02-escape-analysis.md)
+
+## 通用要求
+
 实验代码要求：
 
 ```bash
@@ -25,4 +31,10 @@ go vet ./...
 
 ```bash
 go test -bench=. -benchmem ./...
+```
+
+逃逸分析实验额外要求：
+
+```bash
+go build -gcflags="-m -m" ./...
 ```
