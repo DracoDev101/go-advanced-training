@@ -21,6 +21,7 @@ labs/
 - Lab 5：Error Handling 生产实践：`05-error-handling/`
 - Lab 6：Goroutine 与 GMP 调度模型：`06-goroutine-scheduler/`
 - Lab 7：Channel 原理与使用边界：`07-channel-boundaries/`
+- Lab 8：Context 与取消传播：`08-context-cancellation/`
 
 ## 通用要求
 
