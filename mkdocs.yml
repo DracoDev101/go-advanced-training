@@ -34,6 +34,29 @@ nav:
   - 课程大纲: syllabus.md
   - 课程:
       - "Lesson 1：Go 的设计哲学与工程化取舍": lessons/01-go-design-philosophy.md
+      - "Lesson 2：值、指针与逃逸分析": lessons/02-value-pointer-escape-analysis.md
+      - "Lesson 3：Slice、Map、String 底层结构": lessons/03-slice-map-string-internals.md
+      - "Lesson 4：Interface 深入": lessons/04-interface-deep-dive.md
+      - "Lesson 5：Error Handling 生产实践": lessons/05-error-handling-production.md
+      - "Lesson 6：Goroutine 与 GMP 调度模型": lessons/06-goroutine-gmp-scheduler.md
+      - "Lesson 7：Channel 原理与使用边界": lessons/07-channel-internals-boundaries.md
+      - "Lesson 8：Context 与取消传播": lessons/08-context-cancellation.md
+      - "Lesson 9：Sync、Atomic 与 Memory Model": lessons/09-sync-atomic-memory-model.md
+      - "Lesson 10：并发故障排查": lessons/10-concurrency-debugging.md
+      - "Lesson 11：Go GC 原理": lessons/11-go-gc-internals.md
+      - "Lesson 12：Benchmark 与 pprof": lessons/12-benchmark-pprof.md
+      - "Lesson 13：编译、链接与二进制部署": lessons/13-build-link-deploy.md
+      - "Lesson 14：项目结构与分层设计": lessons/14-project-structure-layering.md
+      - "Lesson 15：HTTP API 生产实践": lessons/15-http-api-production.md
+      - "Lesson 16：gRPC 生产实践": lessons/16-grpc-production.md
+      - "Lesson 17：PostgreSQL 与事务设计": lessons/17-postgres-transaction-repository.md
+      - "Lesson 18：Redis 使用边界": lessons/18-redis-cache-boundaries.md
+      - "Lesson 19：消息队列与事件驱动": lessons/19-message-queue-events.md
+      - "Lesson 20：Observability": lessons/20-observability.md
+      - "Lesson 21：可靠性模式": lessons/21-reliability-patterns.md
+      - "Lesson 22：部署与运行": lessons/22-deployment-operations.md
+      - "Lesson 23：系统设计案例": lessons/23-system-design-cases.md
+      - "Lesson 24：综合项目 Review": lessons/24-final-project-review.md
   - 实验: labs/index.md
   - 综合项目:
       - Production Job Runner: projects/production-job-runner.md
