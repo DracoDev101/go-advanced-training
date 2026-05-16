@@ -1,0 +1,39 @@
+site_name: Go 深度进阶与生产级系统设计训练营
+site_description: Go 语言底层原理、设计哲学、基础概念深入理解与生产级系统设计训练资料
+repo_url: https://github.com/DracoDev101/go-advanced-training
+repo_name: DracoDev101/go-advanced-training
+
+docs_dir: docs
+site_dir: site
+
+theme:
+  name: material
+  language: zh
+  features:
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - content.code.copy
+    - search.highlight
+
+markdown_extensions:
+  - admonition
+  - toc:
+      permalink: true
+  - tables
+  - fenced_code
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.details
+
+nav:
+  - 首页: index.md
+  - 课程大纲: syllabus.md
+  - 课程:
+      - "Lesson 1：Go 的设计哲学与工程化取舍": lessons/01-go-design-philosophy.md
+  - 实验: labs/index.md
+  - 综合项目:
+      - Production Job Runner: projects/production-job-runner.md
+  - 参考资料: references/reading-list.md
