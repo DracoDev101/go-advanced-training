@@ -17,6 +17,7 @@ labs/
 
 - Lab 2：值、指针与逃逸分析：`02-escape-analysis/`
 - Lab 3：Slice、Map、String 底层结构：`03-slice-map-string/`
+- Lab 4：Interface 深入：`04-interface-deep-dive/`
 
 ## 通用要求
 
