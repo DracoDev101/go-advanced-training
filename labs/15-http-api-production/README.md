@@ -1,32 +1,32 @@
-# Lab 15：生产级 HTTP API
+# Lab 15：HTTP Production Debugging
 
-本实验配套 Lesson 15，用统一的最小事件处理模型练习：context 取消、错误处理、状态记录、并发安全、benchmark 和生产 checklist。
+本实验实现一个最小生产级 HTTP API，重点不是路由库，而是 timeout、body limit、错误映射、request id 和 graceful shutdown。
 
-## 关键词
-
-http, middleware, timeout, validation, shutdown, handler
-
-## 运行命令
+## 运行
 
 ```bash
-cd labs/15-http-api-production
-
 go test ./...
 go test -race ./...
 go test -bench=. -benchmem ./...
 go vet ./...
 ```
 
-## 观察目标
+## 观察点
 
-1. 正常路径会记录事件并更新计数。
-2. 无效输入返回稳定错误。
-3. 已取消 context 会中断处理。
-4. benchmark 提供后续优化基线。
-5. 通过最小模型讨论本节主题在 Production Job Runner 中的落地。
+- `NewServer` 必须显式配置 `ReadHeaderTimeout`、`ReadTimeout`、`WriteTimeout`、`IdleTimeout`。
+- `BodyLimit` 防止无上限读取 request body。
+- `Timeout` 将 request context 传入 service。
+- domain error 映射成稳定 HTTP error schema。
+- `X-Request-Id` 贯穿 response 和 error body。
+
+## 排查练习
+
+慢请求：先看 route/status 维度 latency，再查 trace 或 CPU/block profile。
+
+大 body：确认是否使用 `http.MaxBytesReader`。
+
+client cancel：确认 handler/service 是否监听 `r.Context().Done()`。
 
 ## 生产启发
 
-- 每个生产组件都要有 context、错误语义、观测字段和测试。
-- 不要只实现 happy path，失败路径必须可验证。
-- benchmark 不是最终答案，但能防止凭感觉优化。
+Handler 边界应保持：decode → validate → application service → map error → encode。不要在 handler 中直接写 SQL 或做长任务。

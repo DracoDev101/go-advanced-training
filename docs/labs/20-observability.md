@@ -1,32 +1,33 @@
-# Lab 20：Observability：日志、指标与追踪
+# Lab 20：Observability for Job Runner
 
-本实验配套 Lesson 20，用统一的最小事件处理模型练习 context 取消、错误处理、状态记录、并发安全、benchmark 和生产 checklist。
+本实验用无外部依赖的最小模型练习 logs、metrics、traces 的职责边界。
 
-## 关键词
-
-observability, logs, metrics, traces, otel, slo
-
-## 运行命令
+## 运行
 
 ```bash
-cd labs/20-observability
-
 go test ./...
 go test -race ./...
 go test -bench=. -benchmem ./...
 go vet ./...
 ```
 
-## 观察目标
+## 观察点
 
-1. 正常路径记录事件并更新计数。
-2. 无效输入返回稳定错误。
-3. 已取消 context 中断处理。
-4. benchmark 提供优化基线。
-5. 将本节主题映射到 Production Job Runner。
+- `StructuredLog` 固定字段：`request_id`、`trace_id`、`job_id`、`component`、`operation`、`duration_ms`、`error_kind`。
+- `Metrics` 用低基数字段：`kind`、`status`、`reason`；不要把 `job_id` 放 label。
+- `Tracer` 把 `trace_id` 和 `job.id` 放 span attributes，用于单请求链路。
+- `JobRunner.Execute` 演示失败时同时记录 duration、retry counter、span。
+
+## 生产指标建议
+
+```text
+http_request_duration_seconds{route,method,status}
+job_queue_depth{queue}
+job_execution_duration_seconds{kind,status}
+job_retry_total{kind,reason}
+worker_active{group}
+```
 
 ## 生产启发
 
-- 每个生产组件都要有 context、错误语义、观测字段和测试。
-- 不只实现 happy path，失败路径必须可验证。
-- benchmark 能防止凭感觉优化。
+Logs 解释单个事件，Metrics 用于趋势和告警，Traces 串联跨组件路径。三者必须通过 `request_id` / `trace_id` / `job_id` 关联。

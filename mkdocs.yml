@@ -87,3 +87,6 @@ nav:
   - 参考资料:
       - 阅读清单: references/reading-list.md
       - Go 生产问题排查手册: references/troubleshooting-playbook.md
+      - HTTP 生产实践 Checklist: references/http-production-checklist.md
+      - PostgreSQL 排查手册: references/postgres-debugging-playbook.md
+      - Observability 设计指南: references/observability-design-guide.md
