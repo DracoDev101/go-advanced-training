@@ -62,6 +62,7 @@ nav:
       - "Lab 2：值、指针与逃逸分析": labs/02-escape-analysis.md
       - "Lab 3：Slice、Map、String 底层结构": labs/03-slice-map-string.md
       - "Lab 4：Interface 深入": labs/04-interface-deep-dive.md
+      - "Lab 5：Error Handling 生产实践": labs/05-error-handling.md
   - 综合项目:
       - Production Job Runner: projects/production-job-runner.md
   - 参考资料: references/reading-list.md
