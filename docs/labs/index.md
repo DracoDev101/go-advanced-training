@@ -19,6 +19,7 @@ labs/
 - [Lab 3：Slice、Map、String 底层结构](03-slice-map-string.md)
 - [Lab 4：Interface 深入](04-interface-deep-dive.md)
 - [Lab 5：Error Handling 生产实践](05-error-handling.md)
+- [Lab 6：Goroutine 与 GMP 调度模型](06-goroutine-scheduler.md)
 
 ## 通用要求
 
